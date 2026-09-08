@@ -53,8 +53,13 @@ class OllamaClient(LLMClient):
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},
                 ],
-                # temperature 낮게 = 매번 비슷하고 사실 위주의 답 (요약에 적합)
-                options={"temperature": 0.2},
+                options={
+                    # temperature 낮게 = 매번 비슷하고 사실 위주의 답 (요약·RAG에 적합)
+                    "temperature": 0.2,
+                    # 컨텍스트 창 크기(토큰). Ollama 기본값(2048~4096)은 RAG 에서
+                    # 검색된 참고자료가 잘릴 수 있어 넉넉히 키운다.
+                    "num_ctx": 8192,
+                },
             )
         except Exception as e:
             raise RuntimeError(
