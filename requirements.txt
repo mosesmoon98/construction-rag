@@ -1,12 +1,12 @@
-# ===== 무료 로컬 스택 (기본) =====
-ollama                 # 로컬 Ollama 서버와 통신하는 파이썬 클라이언트
+# ===== 무료 로컬 스택 =====
+ollama                 # 로컬 Ollama 서버와 통신하는 파이썬 클라이언트 (LLM)
 python-dotenv          # .env 파일에서 설정(LLM_PROVIDER 등) 읽기
+sentence-transformers  # 3단계: 무료 로컬 임베딩 (문장 -> 벡터). torch 포함
+chromadb               # 3단계: 임베딩 벡터 저장/검색용 로컬 벡터 DB
 
 # ===== 다음 단계에서 추가 (지금은 설치 안 함) =====
-# sentence-transformers  # 3단계: 무료 로컬 임베딩 (한국어는 다국어 모델 사용)
-# chromadb               # 3단계: 임베딩 벡터 저장/검색용 벡터 DB
-# pypdf                  # 3단계: PDF 문서 읽기
-# streamlit              # 5단계: 웹 화면
+# pypdf                # 나중에: PDF 문서 읽기
+# streamlit            # 5단계: 웹 화면
 
 # ===== 선택: 나중에 Claude와 답변 품질 비교할 때만 =====
-# anthropic              # .env 에서 LLM_PROVIDER=claude 로 바꿀 때 필요
+# anthropic            # .env 에서 LLM_PROVIDER=claude 로 바꿀 때 필요

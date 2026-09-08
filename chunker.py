@@ -2,20 +2,20 @@
 2단계: 문서를 작은 조각(chunk)으로 나누는 기능
 
 [왜 나누나?]
-  1) 임베딩 모델·LLM에 한 번에 넣을 수 있는 글자 수에는 한계가 있다.
-  2) 나중에 "질문과 관련된 부분만" 골라서 LLM에게 주려면(=RAG의 R, 검색),
+  1) 임베딩 모델·LLM 에 한 번에 넣을 수 있는 글자 수에는 한계가 있다.
+  2) 나중에 "질문과 관련된 부분만" 골라서 LLM 에게 주려면(=RAG 의 R, 검색),
      문서가 검색 가능한 작은 단위로 쪼개져 있어야 한다.
-  3) 문서 전체를 매번 LLM에 넣으면 느리고, (유료 API라면) 비싸다.
+  3) 문서 전체를 매번 LLM 에 넣으면 느리고, (유료 API 라면) 비싸다.
 
-[방법: 재귀적 문자 분할 (recursive character splitting)]
-  - 먼저 '큰 경계'(빈 줄)로 자른다.
-  - 조각이 여전히 목표 크기보다 크면, 더 작은 경계(줄바꿈 -> 문장 -> 공백 -> 글자)로
-    한 단계씩 내려가며 다시 자른다.
-  - 그래서 목표 크기를 넘지 않으면서도 문단·문장 같은 '의미 단위'를 최대한 보존한다.
-  - 이웃한 조각끼리 끝-앞을 조금 겹치게(overlap) 해서, 경계에서 잘린 내용이
-    최소 한 조각에는 온전히 들어가도록 한다.
-  (LangChain 의 RecursiveCharacterTextSplitter 와 같은 아이디어를, 외부 라이브러리 없이
-   직접 구현한 것.)
+[방법: 줄 단위 패킹 + 줄 단위 overlap]
+  - 건설 문서(시방서 조항, 계약 조문, 보고서 항목)는 대부분 '한 줄 = 하나의
+    완결된 항목' 이다. 그래서 줄을 기본 단위로 삼는다.
+  - 줄들을 목표 크기(CHUNK_SIZE) 이하가 되도록 순서대로 묶는다.
+  - 새 조각을 시작할 때, 직전 조각의 '마지막 몇 줄'(합쳐서 CHUNK_OVERLAP 이하)을
+    앞에 다시 넣어 문맥이 이어지게 한다.
+  - 이렇게 하면 조각의 시작과 끝이 항상 '줄 경계' 라서, 단어·숫자 중간에서
+    잘리지 않는다. (첫 버전은 글자 단위로 잘라서 "27,720,00 / 0,000원" 처럼
+    깨졌고, 그게 검색 품질을 떨어뜨렸다.)
 """
 
 from dataclasses import dataclass
@@ -24,11 +24,28 @@ from pathlib import Path
 # ── 조절 가능한 설정 ─────────────────────────────────────────────
 CHUNK_SIZE = 400        # 한 조각의 목표 최대 길이 (글자 수)
 CHUNK_OVERLAP = 80      # 이웃한 조각끼리 겹치는 길이 (글자 수, CHUNK_SIZE 의 20%)
-
-# 자를 때 위에서부터 순서대로 시도하는 경계들.
-#   "\n\n" 문단  ->  "\n" 줄  ->  ". "/"。" 문장  ->  " " 단어  ->  "" 글자(최후)
-SEPARATORS = ["\n\n", "\n", ". ", "。 ", "。", " ", ""]
 # ────────────────────────────────────────────────────────────────
+
+# CHUNK_SIZE 보다 긴 '한 줄'을 쪼갤 때만 쓰는 하위 경계들 (드문 경우).
+_FALLBACK_SEPARATORS = [". ", "。", " ", ""]
+
+
+def _split_oversized_line(line: str) -> list[str]:
+    """CHUNK_SIZE 보다 긴 한 줄을 문장 -> 공백 -> 글자 순으로 쪼갠다."""
+    parts = [line]
+    for sep in _FALLBACK_SEPARATORS:
+        if all(len(p) <= CHUNK_SIZE for p in parts):
+            break
+        nxt: list[str] = []
+        for p in parts:
+            if len(p) <= CHUNK_SIZE:
+                nxt.append(p)
+            elif sep == "":
+                nxt.extend(p[i:i + CHUNK_SIZE] for i in range(0, len(p), CHUNK_SIZE))
+            else:
+                nxt.extend(p.split(sep))
+        parts = nxt
+    return [p.strip() for p in parts if p.strip()]
 
 
 @dataclass
@@ -41,60 +58,42 @@ class Chunk:
     chunk_index: int     # 그 문서 안에서 몇 번째 조각인지 (0부터)
 
 
-def _recurse(text: str, separators: list[str]) -> list[str]:
-    """separators 를 한 단계씩 내려가며 text 를 CHUNK_SIZE 이하 조각들로 쪼갠다."""
-    # 이미 충분히 작으면 그대로 둔다.
-    if len(text) <= CHUNK_SIZE:
-        return [text]
+def chunk_text(text: str) -> list[str]:
+    """문자열 하나를 조각(문자열) 리스트로 나눈다."""
+    text = text.replace("\r\n", "\n")
 
-    # 이 텍스트 안에 실제로 존재하는 첫 번째 경계를 고른다.
-    sep = ""
-    for s in separators:
-        if s == "" or s in text:
-            sep = s
-            break
-
-    # 더 쪼갤 경계가 없으면(=""), 어쩔 수 없이 글자 수로 강제 분할.
-    if sep == "":
-        return [text[i:i + CHUNK_SIZE] for i in range(0, len(text), CHUNK_SIZE)]
-
-    # 고른 경계로 1차 분할. 그래도 큰 조각은 '다음 단계 경계들'로 재귀.
-    next_separators = separators[separators.index(sep) + 1:]
-    pieces: list[str] = []
-    for part in text.split(sep):
-        if len(part) <= CHUNK_SIZE:
-            pieces.append(part)
+    # 1) 빈 줄을 뺀 '줄' 목록을 만든다. 너무 긴 줄은 미리 잘게 쪼갠다.
+    units: list[str] = []
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if len(line) <= CHUNK_SIZE:
+            units.append(line)
         else:
-            pieces.extend(_recurse(part, next_separators))
+            units.extend(_split_oversized_line(line))
 
-    # 잘게 나뉜 조각들을 CHUNK_SIZE 이하로 다시 '뭉치고', 사이에 overlap 을 준다.
-    return _merge(pieces, sep)
-
-
-def _merge(pieces: list[str], sep: str) -> list[str]:
-    """작은 조각들을 CHUNK_SIZE 이하로 이어붙이되, 새 조각을 시작할 때
-    직전 조각의 마지막 CHUNK_OVERLAP 글자를 앞에 붙여 문맥이 이어지게 한다."""
+    # 2) 줄들을 CHUNK_SIZE 이하로 묶고, 조각 사이에 줄 단위 overlap 을 준다.
     chunks: list[str] = []
-    current = ""
+    current: list[str] = []
 
-    for part in pieces:
-        candidate = part if current == "" else current + sep + part
-        if len(candidate) <= CHUNK_SIZE or current == "":
-            current = candidate
-        else:
-            chunks.append(current)
-            overlap_tail = current[-CHUNK_OVERLAP:]        # 직전 조각의 꼬리
-            current = overlap_tail + sep + part            # 다음 조각의 머리에 이어붙임
+    for unit in units:
+        would_be = "\n".join([*current, unit])
+        if current and len(would_be) > CHUNK_SIZE:
+            chunks.append("\n".join(current))
+            # 직전 조각의 마지막 줄들을 CHUNK_OVERLAP 이하까지 이월
+            carry: list[str] = []
+            for u in reversed(current):
+                if len("\n".join([u, *carry])) > CHUNK_OVERLAP:
+                    break
+                carry.insert(0, u)
+            current = carry
+        current.append(unit)
 
     if current:
-        chunks.append(current)
-    return chunks
+        chunks.append("\n".join(current))
 
-
-def chunk_text(text: str) -> list[str]:
-    """문자열 하나를 조각 리스트로."""
-    text = text.replace("\r\n", "\n")                      # 윈도우 줄바꿈 정리
-    return [c.strip() for c in _recurse(text, SEPARATORS) if c.strip()]
+    return [c.strip() for c in chunks if c.strip()]
 
 
 def chunk_document(path: Path) -> list[Chunk]:
